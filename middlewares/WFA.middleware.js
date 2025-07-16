@@ -30,7 +30,7 @@ class FixedWindowRateLimiter {
     return Math.max(0, windowEndTime - currentTime);
   }
 
-  handleMiddleware = (_req, _res, next) => {
+  handleMiddleware = (_req, res, next) => {
     if (this.#isWindowExpired()) {
       this.#windowStartTime = Date.now();
       this.#remainingRequests = this.#maxRequestsPerWindow;
@@ -41,25 +41,28 @@ class FixedWindowRateLimiter {
       return next();
     }
 
-    return next(
-      new RateLimitError({
-        retryAfter: this.#getRetryAfterMs(),
-      })
-    );
+    res.set({
+      "X-RateLimit-Limit": this.#maxRequestsPerWindow,
+      "X-RateLimit-Remaining": this.#remainingRequests,
+      "X-RateLimit-RetryAfter": this.#getRetryAfterMs(),
+    });
+
+    return next(new RateLimitError({}));
   };
 }
-
 class FixedWindowRateLimiterByIP {
   #maxRequestsPerWindow;
   #windowDurationMs;
   #clientWindows;
+  #cleanTimer;
   constructor({ maxRequestsPerWindow, windowDuration }) {
     this.#maxRequestsPerWindow = maxRequestsPerWindow;
     this.#windowDurationMs = TIME_MULTIPLIERS.get(windowDuration);
     this.#clientWindows = new Map();
+    this.#cleanTimer = this.#startCleanupTimer();
   }
 
-  #createWindow(ip) {
+  #createWindow() {
     return {
       remainingRequests: this.#maxRequestsPerWindow,
       windowStartTime: Date.now(),
@@ -86,7 +89,24 @@ class FixedWindowRateLimiterByIP {
     );
   }
 
-  handleMiddleware = (req, _res, next) => {
+  #startCleanupTimer() {
+    setInterval(() => {
+      for (const [key, value] of this.#clientWindows.entries()) {
+        if (this.#isWindowExpired(value)) {
+          this.#clientWindows.delete(key);
+        }
+      }
+    }, this.#windowDurationMs);
+  }
+
+  #clearCleanupTimer() {
+    if (this.#cleanTimer) {
+      clearInterval(this.#cleanTimer);
+      this.#cleanTimer = null;
+    }
+  }
+
+  handleMiddleware = (req, res, next) => {
     const clientIP = this.#getClientIP(req);
     if (!clientIP) {
       return next(new ClientIpNotFoundError());
@@ -94,22 +114,29 @@ class FixedWindowRateLimiterByIP {
 
     let window = this.#clientWindows.get(clientIP);
     if (window === undefined || this.#isWindowExpired(window)) {
-      window = this.#createWindow(clientIP);
+      window = this.#createWindow();
     }
 
     if (window.remainingRequests > 0) {
+      const remainingRequests = window.remainingRequests - 1;
       this.#clientWindows.set(clientIP, {
         ...window,
-        remainingRequests: window.remainingRequests - 1,
+        remainingRequests,
+      });
+      res.set({
+        "X-RateLimit-Limit": this.#maxRequestsPerWindow,
+        "X-RateLimit-Remaining": remainingRequests,
+        "X-RateLimit-RetryAfter": 0,
       });
       return next();
     }
 
-    return next(
-      new RateLimitError({
-        retryAfter: this.#getRetryAfterMs(window),
-      })
-    );
+    res.set({
+      "X-RateLimit-Limit": this.#maxRequestsPerWindow,
+      "X-RateLimit-Remaining": 0,
+      "X-RateLimit-RetryAfter": this.#getRetryAfterMs(window),
+    });
+    return next(new RateLimitError({}));
   };
 }
 

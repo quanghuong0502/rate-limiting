@@ -42,10 +42,8 @@ class RateLimitError extends AppError {
     message = ERROR_MESSAGES.RATE_LIMIT_EXCEEDED,
     status = ERROR_STATUS.TOO_MANY_REQUESTS,
     code,
-    retryAfter,
   }) {
     super({ message, status, code });
-    this.retryAfter = retryAfter;
   }
 }
 
